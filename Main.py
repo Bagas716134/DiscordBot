@@ -17,8 +17,8 @@ port = 80
 target = ""
 totalattack = 0
 
-YOUR_CHANNEL_ID = "1140588460017717318/1140588460470698135"
-TOKEN = 'MTE0MDU4NTA1MzMyODUyNzM5MA.GdhlbN.qSRZvbHRlS0_KXAQTuPj_1QcU2lEhPmHkIz9ow'
+YOUR_CHANNEL_ID = ""
+TOKEN = ''
 
 intents = discord.Intents.default()
 intents.message_content = True
